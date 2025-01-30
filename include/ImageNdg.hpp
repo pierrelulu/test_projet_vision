@@ -346,10 +346,12 @@ _EXPORT_ void applyCorrectionField(
 );
 
 _EXPORT_ void build3DPointsFromCorrection(
+    const CImageNdg& correctedVolume,
     const std::vector<std::vector<float>>& corrField,
-    std::vector<float>& xcoords,
-    std::vector<float>& ycoords,
-    std::vector<float>& zcoords
+    std::vector<float>& X,
+    std::vector<float>& Y,
+    std::vector<float>& Z,
+    bool applyTransform
 );
 
 _EXPORT_ void centerAndScalePoints(
@@ -357,4 +359,38 @@ _EXPORT_ void centerAndScalePoints(
     std::vector<float>& ycoords,
     std::vector<float>& zcoords,
     float scale_factor
+);
+
+_EXPORT_ float computeScaleY(
+    const std::vector<std::vector<int>>& correctedLabels,
+    int num
+);
+
+_EXPORT_ float computeScaleZ(
+    const std::vector<std::vector<int>>& newLabels,
+    const std::vector<std::vector<float>>& depthMap,
+    float realMaxDiffMm
+);
+
+_EXPORT_ void scaleAndShiftCloud(
+    std::vector<float>& X,
+    std::vector<float>& Y,
+    std::vector<float>& Z,
+    float scaleX,
+    float scaleY,
+    float scaleZ
+);
+
+_EXPORT_ CImageNdg recomposeImageFromXYZ(
+    const std::vector<float>& X,
+    const std::vector<float>& Y,
+    const std::vector<float>& Z,
+    unsigned char valFond
+);
+
+_EXPORT_ void exportPointsToPLY(
+    const std::vector<float>& X,
+    const std::vector<float>& Y,
+    const std::vector<float>& Z,
+    const std::string& filename
 );

@@ -19,53 +19,128 @@
 
 int main()
 {
-    // Charger l'image
-    CImageCouleur imageDepthColor("line_calib_depth.bmp");
+    try
+    {
+        // =============== PARTIE 1 : IMAGE PERSPECTIVE ===============
+        // 1) Charger l'image (couleur) "perspective"
+        CImageCouleur imageDepthColor("images/1.bmp");
 
-    // Étape 1 : Extraire le plan bleu (dans ce cas, l'image est déjà en niveaux de gris)
-    CImageNdg imageDepth = imageDepthColor.plan(2);
-    imageDepth.sauvegarde("line_calib_depth_origine");
+        // 2) Extraire le plan bleu -> NDG
+        CImageNdg imageDepth = imageDepthColor.plan(2);
+        imageDepth.sauvegarde("01_line_calib_depth_origine");
 
-    // 2) Squelettisation et labélisation
-    CImageNdg labelsDepth, squeletteDepth;
-    int numDepth;
-    process_image(imageDepth, labelsDepth, numDepth, squeletteDepth);
+        // 3) Squelettisation et labélisation
+        CImageNdg labelsDepth, squeletteDepth;
+        int numDepth = 0;
+        process_image(imageDepth, labelsDepth, numDepth, squeletteDepth);
 
-    // 3) Correction des lignes
-    std::vector< std::vector< std::pair<int,int> > > correctionsDepth;
-    CImageNdg correctedLabelsDepth;
-    correctLines(labelsDepth, numDepth, correctionsDepth, correctedLabelsDepth);
+        // 4) Correction des lignes => correctedLabelsDepth
+        std::vector<std::vector<std::pair<int, int>>> correctionsDepth;
+        CImageNdg correctedLabelsDepth;
+        correctLines(labelsDepth, numDepth, correctionsDepth, correctedLabelsDepth);
 
-    // 4) Construction du champ de correction, interpolation, flou gaussien
-    std::vector<std::vector<float>> corrFieldDepth;
-    buildCorrectionField(labelsDepth, numDepth, correctionsDepth, corrFieldDepth);
-    verticalInterpolation(corrFieldDepth);
+        // 5) Champ de correction => corrFieldDepth
+        std::vector<std::vector<float>> corrFieldDepth;
+        buildCorrectionField(labelsDepth, numDepth, correctionsDepth, corrFieldDepth);
 
-    // Flou gaussien
-    std::vector<std::vector<float>> corrFieldDepthBlur;
-    gaussianBlur2D(corrFieldDepth, 20.0f, corrFieldDepthBlur);
+        // Interpolation verticale
+        verticalInterpolation(corrFieldDepth);
 
-    // 5) Appliquer ce champ à une nouvelle image "line_calib_volume.jpg"
-    CImageNdg imageVolume("line_calib_volume.bmp");  // à adapter
-    CImageNdg labelsVolume, squeletteVolume;
-    int numVolume;
-    process_image(imageVolume, labelsVolume, numVolume, squeletteVolume);
-    squeletteVolume.sauvegarde("squeletteVolume");
+        // Flou gaussien => corrFieldDepthBlur
+        std::vector<std::vector<float>> corrFieldDepthBlur;
+        gaussianBlur2D(corrFieldDepth, 20.0f, corrFieldDepthBlur);
 
-    CImageNdg correctedVolume;
-    applyCorrectionField(labelsVolume, corrFieldDepthBlur, correctedVolume);
-    correctedVolume.sauvegarde("correctedVolume");
-    // 6) (Eventuellement) relabelliser/corriger cette nouvelle image, etc.
-    //    pour l'estimation d'échelle selon votre script final
+        // 6) Calcul de scale_y (mm/pixel) depuis "correctedLabelsDepth"
+        //    On convertit correctedLabelsDepth en matrice d'entiers :
+        int hDepth = correctedLabelsDepth.lireHauteur();
+        int wDepth = correctedLabelsDepth.lireLargeur();
+        std::vector<std::vector<int>> correctedLabelsInt(hDepth, std::vector<int>(wDepth, 0));
 
-    // 7) Extraction des points 3D
-    std::vector<float> x, y, z;
-    build3DPointsFromCorrection(corrFieldDepthBlur, x, y, z);
-    centerAndScalePoints(x, y, z, 1.0f);
+        for (int i = 0; i < hDepth; i++)
+        {
+            for (int j = 0; j < wDepth; j++)
+            {
+                correctedLabelsInt[i][j] = (int)correctedLabelsDepth(i, j);
+            }
+        }
 
-    // 8) Écriture .ply (à adapter à votre code)
-    //    ...
-    std::cout << "Traitement terminé. Toutes les étapes ont été sauvegardées." << std::endl;
+        float scaleY = computeScaleY(correctedLabelsInt, numDepth);
+        //TEMPOROAIRE TODO
+        //scaleY /= 10;
+
+        // scaleX = scaleY
+        float scaleX = scaleY;
+        std::cout << "[Info] scaleY (mm/pixel) = " << scaleY << std::endl;
+
+        // =============== PARTIE 2 : IMAGE VOLUME ===============
+        // 7) Charger la deuxième image (volume)
+        CImageNdg imageVolume("images_obj/1.bmp");
+
+        // Squelettisation et labélisation
+        CImageNdg labelsVolume, squeletteVolume;
+        int numVolume = 0;
+        process_image(imageVolume, labelsVolume, numVolume, squeletteVolume);
+        squeletteVolume.sauvegarde("02_squeletteVolume");
+
+        // 8) Appliquer le champ corrFieldDepthBlur sur la 2e image => correctedVolume
+        CImageNdg correctedVolume;
+        applyCorrectionField(labelsVolume, corrFieldDepthBlur, correctedVolume);
+        correctedVolume.sauvegarde("03_correctedVolume");
+
+        // === NOUVEAU : Re-labellisation / Correction #2 comme en MATLAB
+        // 9) correctLines(...) sur correctedVolume => correctedLabels2
+        std::vector<std::vector<std::pair<int, int>>> corrections2;
+        CImageNdg correctedLabels2;
+        correctLines(correctedVolume, numVolume, corrections2, correctedLabels2);
+        correctedLabels2.sauvegarde("04_corrected_labels2");
+
+        // 10) buildCorrectionField(...) => depthMap2
+        std::vector<std::vector<float>> depthMap2;
+        buildCorrectionField(correctedVolume, numVolume, corrections2, depthMap2);
+        // On pourrait l'enregistrer via mat2gray si on veut (ex: recompose en NDG)
+
+        // 11) Calcul de scale_z (mm/pixel) en se basant sur correctedVolume et depthMap2
+        //     On convertit correctedVolume en std::vector<std::vector<int>>
+        int hVol = correctedVolume.lireHauteur();
+        int wVol = correctedVolume.lireLargeur();
+        std::vector<std::vector<int>> newLabelsInt(hVol, std::vector<int>(wVol, 0));
+        for (int i = 0; i < hVol; i++)
+        {
+            for (int j = 0; j < wVol; j++)
+            {
+                newLabelsInt[i][j] = (int)correctedVolume(i, j);
+            }
+        }
+
+        float scaleZ = computeScaleZ(newLabelsInt, depthMap2, 50.0f);
+        std::cout << "[Info] scaleZ (mm/pixel) = " << scaleZ << std::endl;
+
+        // =============== PARTIE 3 : GÉNÉRATION DU NUAGE 3D FINAL ===============
+        // 12) Construire le nuage (X2, Y2, Z2) depuis correctedLabels2 + depthMap2
+        //     On applique la même transformation x=-col, y=row - z, z=-z  (param "true")
+        std::vector<float> X2, Y2, Z2;
+        build3DPointsFromCorrection(correctedVolume, depthMap2, X2, Y2, Z2, true);
+
+        // 13) Appliquer l'échelle et recadrer
+        //     On a scaleX=scaleY (déjà calculé) et scaleZ
+        scaleAndShiftCloud(X2, Y2, Z2, scaleX, scaleY, scaleZ);
+
+        // 14) Sauvegarder le nuage en .ply
+        exportPointsToPLY(X2, Y2, Z2, "../output/my_cloud_final.ply");
+
+        // 15) (Optionnel) Recomposer une image NDG depuis (X2, Y2, Z2)
+        //     juste pour visualiser
+        CImageNdg recompose2 = recomposeImageFromXYZ(X2, Y2, Z2, 128);
+        recompose2.sauvegarde("05_recompose_from_xyz2");
+
+        std::cout << "Traitement terminé. Toutes les étapes ont été sauvegardées." << std::endl;
+    }
+    catch (const std::string& err)
+    {
+        std::cerr << "Erreur : " << err << std::endl;
+        return -1;
+    }
+
     return 0;
 }
 

@@ -1267,7 +1267,7 @@ _EXPORT_ void process_image(
         for (int j = 0; j < w; j++)
         {
             float val = (float)planBleu(i, j) / 255.0f;
-            if (val > 0.8f)
+            if (val > 0.7f)
                 binImage(i, j) = 1;  // pixel blanc
             else
                 binImage(i, j) = 0;  // pixel noir
@@ -1583,40 +1583,70 @@ _EXPORT_ void applyCorrectionField(
     }
 }
 
+ /**
+ * @brief Construit un nuage de points (X,Y,Z) à partir d'une image corrigée (correctedVolume)
+ *        et d'un champ de correction (corrField). Seuls les pixels dont le label != 0 sont utilisés.
+ *
+ * @param correctedVolume  L'image corrigée (labellisée), dimensions h x w, type CImageNdg
+ * @param corrField        Le champ de correction (même taille h x w), type float
+ * @param X                Vecteur où seront ajoutées les coordonnées X
+ * @param Y                Vecteur où seront ajoutées les coordonnées Y
+ * @param Z                Vecteur où seront ajoutées les coordonnées Z
+ * @param applyTransform   Si true, applique la logique x=-col, y=row - z, z=-z
+ */
 _EXPORT_ void build3DPointsFromCorrection(
-    const std::vector<std::vector<float>>& corrField,
-    std::vector<float>& xcoords,
-    std::vector<float>& ycoords,
-    std::vector<float>& zcoords
-)
+        const CImageNdg& correctedVolume,
+        const std::vector<std::vector<float>>& corrField,
+        std::vector<float>& X,
+        std::vector<float>& Y,
+        std::vector<float>& Z,
+        bool applyTransform = true
+    )
 {
-    // On parcourt corrField(h, w). Indice i=0..h-1, j=0..w-1
-    // Dans le code MATLAB:
-    //   x = -x;
-    //   y = y - z;
-    //   z = -z;
-    // (après filtrage mask !=0). Adaptons la logique.
-    int h = (int)corrField.size();
-    if (h == 0) return;
-    int w = (int)corrField[0].size();
-    xcoords.clear();
-    ycoords.clear();
-    zcoords.clear();
+    // Récupération des dimensions
+    int h = correctedVolume.lireHauteur();
+    int w = correctedVolume.lireLargeur();
 
-    for (int i = 0; i < h; i++)
+    // Sécurité : vérifier qu'on a la même taille pour corrField
+    if ((int)corrField.size() != h || (h > 0 && (int)corrField[0].size() != w))
     {
-        for (int j = 0; j < w; j++)
+        // Erreur de dimensions
+        throw std::string("build3DPointsFromCorrection: Dimensions non cohérentes entre correctedVolume et corrField!");
+    }
+
+    // Réserver la place (optionnel, juste pour limiter les realloc)
+    X.reserve(h * w);
+    Y.reserve(h * w);
+    Z.reserve(h * w);
+
+    // Parcourt tous les pixels
+    for (int row = 0; row < h; row++)
+    {
+        for (int col = 0; col < w; col++)
         {
-            float zval = corrField[i][j];
-            if (std::abs(zval) > 1e-9)
+            unsigned char labelVal = correctedVolume(row, col);
+            if (labelVal != 0)
             {
-                // En MATLAB: 
-                //   x = -j,
-                //   y = i - z(i,j),
-                //   z = -z(i,j)
-                xcoords.push_back(-(float)j);
-                ycoords.push_back((float)i - zval);
-                zcoords.push_back(-zval);
+                // Ce pixel appartient à une ligne (label != 0)
+                float zVal = corrField[row][col];
+
+                // Transformations éventuelles
+                // (Le code MATLAB faisait x=-col, y=row - z, z=-z)
+                float xCoord = (float)col;
+                float yCoord = (float)row;
+                float zCoord = zVal;
+
+                if (applyTransform)
+                {
+                    xCoord = -(float)col;
+                    yCoord = (float)row -zVal;
+                    zCoord = -zVal;
+                }
+
+                // On ajoute dans les vecteurs
+                X.push_back(xCoord);
+                Y.push_back(yCoord);
+                Z.push_back(zCoord);
             }
         }
     }
@@ -1651,4 +1681,391 @@ _EXPORT_ void centerAndScalePoints(
         ycoords[i] = (ycoords[i] - cy) / scale_factor;
         zcoords[i] = (zcoords[i] - cz) / scale_factor;
     }
+}
+
+/**
+ * @brief Calcule la scale_y (mm/pixel) en se basant sur l'image corrected_labels
+ *        où chaque label est "aplatit" horizontalement.
+ *
+ * @param correctedLabels  Matrice 2D (h x w) de labels (int).
+ * @param num              Nombre total de labels (1..num).
+ * @return float           scale_y en mm/pixel (ou 0 si non calculable).
+ */
+_EXPORT_ float computeScaleY(
+    const std::vector<std::vector<int>>& correctedLabels,
+    int num
+)
+{
+    // line_positions contiendra la coordonnée i (ligne) correspondant
+    // au pixel le plus à gauche (col minimum) pour chaque label.
+    std::vector<int> linePositions;
+    linePositions.resize(num, 0); // par défaut 0
+
+    int h = (int)correctedLabels.size();
+    if (h == 0) return 0.0f;
+    int w = (int)correctedLabels[0].size();
+
+    // 1) Pour chaque label, on récupère le min_col
+    //    et la ligne correspondante
+    for (int label = 1; label <= num; label++)
+    {
+        // Recherche des pixels du label
+        // On stocke leur (row, col) pour trouver min_col
+        int minCol = w + 1;
+        int rowForMinCol = -1;
+
+        for (int i = 0; i < h; i++)
+        {
+            for (int j = 0; j < w; j++)
+            {
+                if (correctedLabels[i][j] == label)
+                {
+                    if (j < minCol)
+                    {
+                        minCol = j;
+                        rowForMinCol = i;
+                    }
+                }
+            }
+        }
+
+        // Si on a trouvé un pixel, rowForMinCol >= 0
+        if (rowForMinCol >= 0)
+        {
+            // label-1 pour indexer linePositions
+            linePositions[label - 1] = rowForMinCol;
+        }
+    }
+
+    // 2) Supprimer les éléments = 0 (qui n'ont pas été remplis)
+    //    car label sans pixel ou rowForMinCol == 0
+    std::vector<int> filtered;
+    filtered.reserve(num);
+    for (auto val : linePositions)
+    {
+        if (val != 0) filtered.push_back(val);
+    }
+    if (filtered.size() < 2)
+    {
+        // Pas assez de lignes pour calculer un écart
+        return 0.0f;
+    }
+
+    // 3) Trier
+    std::sort(filtered.begin(), filtered.end());
+
+    // 4) Prendre la médiane des diff successifs
+    //    diffs[i] = filtered[i+1] - filtered[i]
+    std::vector<int> diffs;
+    diffs.reserve(filtered.size() - 1);
+    for (size_t i = 0; i < filtered.size() - 1; i++)
+    {
+        int d = filtered[i + 1] - filtered[i];
+        diffs.push_back(d);
+    }
+    // Tri des diffs pour en extraire la médiane
+    std::sort(diffs.begin(), diffs.end());
+    int mid = (int)diffs.size() / 2;
+
+    float d_pix = 0.0f;
+    if (diffs.size() % 2 == 0)
+    {
+        // nombre pair => moyenne de 2 valeurs
+        d_pix = 0.5f * (diffs[mid - 1] + diffs[mid]);
+    }
+    else
+    {
+        // nombre impair
+        d_pix = (float)diffs[mid];
+    }
+
+    // 5) Hypothèse: l'écart entre lignes vaut 5 mm
+    float real_spacing_mm = 5.0f;
+    float scale_y = 0.0f;
+    if (std::fabs(d_pix) > 1e-9)
+        scale_y = real_spacing_mm / d_pix; // mm/pixel
+
+    return scale_y;
+}
+
+
+/**
+ * @brief Calcule la scale_z (mm/pixel) en se basant sur new_labels et depth_map
+ *        en cherchant le plus grand écart (max - min) parmi toutes les lignes.
+ *
+ * @param newLabels    Matrice 2D (h x w) de labels (int).
+ * @param depthMap     Matrice 2D (h x w) de float (valeurs de correction).
+ * @param realMaxDiffMm  Valeur réelle en mm correspondant au plus grand écart
+ *                       (ex. 50 mm).
+ * @return float       scale_z en mm/pixel
+ */
+_EXPORT_ float computeScaleZ(
+    const std::vector<std::vector<int>>& newLabels,
+    const std::vector<std::vector<float>>& depthMap,
+    float realMaxDiffMm = 50.0f
+)
+{
+    int h = (int)newLabels.size();
+    if (h == 0) return 0.0f;
+    int w = (int)newLabels[0].size();
+
+    // on récupère le nombre max de label
+    int numLabels = 0;
+    // Rechercher le maximum dans newLabels
+    for (int i = 0; i < h; i++)
+    {
+        for (int j = 0; j < w; j++)
+        {
+            if (newLabels[i][j] > numLabels)
+                numLabels = newLabels[i][j];
+        }
+    }
+
+    float maxDiffPixels = 0.0f;
+
+    // 1) Pour chaque label, on calcule local_diff = max(vals) - min(vals)
+    for (int label = 1; label <= numLabels; label++)
+    {
+        float localMin = 1e9f;
+        float localMax = -1e9f;
+        bool foundAny = false;
+
+        for (int i = 0; i < h; i++)
+        {
+            for (int j = 0; j < w; j++)
+            {
+                if (newLabels[i][j] == label)
+                {
+                    float val = depthMap[i][j];
+                    if (val < localMin) localMin = val;
+                    if (val > localMax) localMax = val;
+                    foundAny = true;
+                }
+            }
+        }
+
+        if (foundAny)
+        {
+            float localDiff = localMax - localMin;
+            if (localDiff > maxDiffPixels)
+                maxDiffPixels = localDiff;
+        }
+    }
+
+    // 2) Si maxDiffPixels=0 => impossible de calculer
+    if (std::fabs(maxDiffPixels) < 1e-9)
+        return 0.0f;
+
+    // 3) scale_z = realMaxDiffMm / maxDiffPixels
+    float scale_z = realMaxDiffMm / maxDiffPixels;
+    return scale_z;
+}
+
+
+/**
+ * @brief Applique l'échelle (scale_x, scale_y, scale_z) à un nuage de points (X, Y, Z)
+ *        puis recadre en soustrayant leurs minima pour démarrer à (0,0,0).
+ *
+ * @param X         vecteur des X
+ * @param Y         vecteur des Y
+ * @param Z         vecteur des Z
+ * @param scaleX    échelle à appliquer sur X
+ * @param scaleY    échelle à appliquer sur Y
+ * @param scaleZ    échelle à appliquer sur Z
+ */
+_EXPORT_ void scaleAndShiftCloud(
+    std::vector<float>& X,
+    std::vector<float>& Y,
+    std::vector<float>& Z,
+    float scaleX,
+    float scaleY,
+    float scaleZ
+)
+{
+    // 1) On applique l'échelle
+    for (size_t i = 0; i < X.size(); i++)
+    {
+        X[i] *= scaleX;
+        Y[i] *= scaleY;
+        Z[i] *= scaleZ;
+    }
+
+    // 2) On calcule minX, minY, minZ pour recadrer à 0
+    float minX = 1e9f, minY = 1e9f, minZ = 1e9f;
+    for (size_t i = 0; i < X.size(); i++)
+    {
+        if (X[i] < minX) minX = X[i];
+        if (Y[i] < minY) minY = Y[i];
+        if (Z[i] < minZ) minZ = Z[i];
+    }
+
+    // 3) Soustraction
+    for (size_t i = 0; i < X.size(); i++)
+    {
+        X[i] -= minX;
+        Y[i] -= minY;
+        Z[i] -= minZ;
+    }
+}
+
+/**
+ * @brief Recompose une image NDG à partir d'un nuage de points (X, Y, Z).
+ *        Chaque point devient un pixel sur la coordonnée (row=Y, col=X),
+ *        la valeur du pixel est obtenue en remappant Z dans [0..255].
+ *        Le fond (pixels sans point) est initialisé à 128.
+ *
+ * @param X              Coordonnées X (col) de chaque point
+ * @param Y              Coordonnées Y (row) de chaque point
+ * @param Z              Coordonnées Z de chaque point
+ * @param valFond        Valeur NDG du fond (ex: 128 = 255/2)
+ * @return CImageNdg     L'image NDG reconstituée
+ */
+_EXPORT_ CImageNdg recomposeImageFromXYZ(
+    const std::vector<float>& X,
+    const std::vector<float>& Y,
+    const std::vector<float>& Z,
+    unsigned char valFond = 128
+)
+{
+    // 1) Vérifier cohérence
+    if (X.size() != Y.size() || Y.size() != Z.size())
+    {
+        throw std::string("recomposeImageFromXYZ: Taille incohérente entre X, Y et Z !");
+    }
+
+    size_t n = X.size();
+    if (n == 0)
+    {
+        // Pas de points => on retourne une image vide
+        return CImageNdg(0, 0, 0);
+    }
+
+    // 2) Trouver minX, maxX, minY, maxY
+    float minX = X[0], maxX = X[0];
+    float minY = Y[0], maxY_ = Y[0];
+    for (size_t i = 1; i < n; i++)
+    {
+        if (X[i] < minX) minX = X[i];
+        if (X[i] > maxX) maxX = X[i];
+        if (Y[i] < minY) minY = Y[i];
+        if (Y[i] > maxY_) maxY_ = Y[i];
+    }
+
+    // 3) Calcul de la taille de l'image
+    //    On fait un arrondi (on suppose que X, Y peuvent être non entiers).
+    //    => on va décaler minX, minY à 0, ou on va allouer +1 pour couvrir tout.
+    int iMinX = (int)std::floor(minX);
+    int iMaxX = (int)std::ceil(maxX);
+    int iMinY = (int)std::floor(minY);
+    int iMaxY = (int)std::ceil(maxY_);
+
+    int width = iMaxX - iMinX + 1;
+    int height = iMaxY - iMinY + 1;
+
+    if (width <= 0 || height <= 0)
+    {
+        throw std::string("recomposeImageFromXYZ: Dimensions négatives ou nulles !");
+    }
+
+    // 4) Trouver minZ, maxZ pour un remappage dans [0..255]
+    float minZ = Z[0], maxZ = Z[0];
+    for (size_t i = 1; i < n; i++)
+    {
+        if (Z[i] < minZ) minZ = Z[i];
+        if (Z[i] > maxZ) maxZ = Z[i];
+    }
+    float rangeZ = maxZ - minZ;
+    if (std::fabs(rangeZ) < 1e-9)
+    {
+        // Cas spécial: Z est constant => tout le monde aura la même valeur => 255 ou 0, par exemple.
+        rangeZ = 1.0f;
+    }
+
+    // 5) Créer l'image NDG, initialisée à valFond (128 par défaut).
+    CImageNdg out(height, width, -1);
+    // -1 => non-initialisé dans le constructeur, donc on va le faire nous-mêmes:
+    for (int i = 0; i < out.lireNbPixels(); i++)
+    {
+        out(i) = valFond;
+    }
+
+    // 6) Parcourir les points et remplir out(row, col) = remap(Z)
+    for (size_t idx = 0; idx < n; idx++)
+    {
+        // Calcul col, row (coord pixels)
+        float fx = X[idx];
+        float fy = Y[idx];
+        int col = (int)std::round(fx) - iMinX;
+        int row = (int)std::round(fy) - iMinY;
+        // Vérifier que col, row tombent dans [0..width-1], [0..height-1]
+        if (col < 0 || col >= width || row < 0 || row >= height)
+        {
+            // Le point sort de l'image -> on ignore ou on gère autrement
+            continue;
+        }
+
+        // Remappage de Z[idx] en [0..255]
+        float valZ = (Z[idx] - minZ) / rangeZ; // => [0..1]
+        float gray = valZ * 255.0f;
+        if (gray < 0.f) gray = 0.f;
+        if (gray > 255.f) gray = 255.f;
+
+        out(row, col) = (unsigned char)std::round(gray);
+    }
+
+    return out;
+}
+
+/**
+ * @brief Exporte un nuage de points (X, Y, Z) en format .ply ASCII.
+ *
+ * @param X          Vecteur contenant la coordonnée X de chaque point.
+ * @param Y          Vecteur contenant la coordonnée Y de chaque point.
+ * @param Z          Vecteur contenant la coordonnée Z de chaque point.
+ * @param filename   Nom (ou chemin) du fichier .ply à créer.
+ */
+_EXPORT_ void exportPointsToPLY(
+    const std::vector<float>& X,
+    const std::vector<float>& Y,
+    const std::vector<float>& Z,
+    const std::string& filename
+)
+{
+    // Vérifie qu'on a le même nombre de points pour X, Y, et Z
+    if (X.size() != Y.size() || Y.size() != Z.size())
+    {
+        std::cerr << "Erreur: X, Y et Z n'ont pas la même taille !" << std::endl;
+        return;
+    }
+
+    // Ouvre le fichier en écriture texte
+    std::ofstream ofs(filename.c_str());
+    if (!ofs.is_open())
+    {
+        std::cerr << "Impossible de créer le fichier : " << filename << std::endl;
+        return;
+    }
+
+    size_t nbPoints = X.size();
+
+    // Ecriture de l'en‐tête PLY en format ASCII
+    ofs << "ply\n";
+    ofs << "format ascii 1.0\n";
+    ofs << "element vertex " << nbPoints << "\n";
+    ofs << "property float x\n";
+    ofs << "property float y\n";
+    ofs << "property float z\n";
+    ofs << "end_header\n";
+
+    // Ecriture des points
+    for (size_t i = 0; i < nbPoints; i++)
+    {
+        ofs << X[i] << " "
+            << Y[i] << " "
+            << Z[i] << "\n";
+    }
+
+    ofs.close();
+    std::cout << "Fichier PLY exporté : " << filename
+        << " (" << nbPoints << " points)" << std::endl;
 }
